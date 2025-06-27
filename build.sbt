@@ -29,7 +29,13 @@ lazy val root = project
       "-deprecation",
       "-feature",
       "-unchecked",
-      "-explain"
+      "-explain",
+      "-Yexplain-lowlevel",
+      "-Wunused:all"
+      // "-rewrite",
+      // "-source",
+      // "3.0-migration",
+      // "-new-syntax"
     ),
     libraryDependencies += "org.typelevel" %% "cats-core" % "2.13.0",
     libraryDependencies += "org.scalameta" %% "munit" % "1.1.1" % Test
