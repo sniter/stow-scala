@@ -1,57 +1,76 @@
 package io.sniter
 
-import cats.syntax.applicative.*
 import cats.syntax.either.*
 import cats.syntax.eq.*
-import cats.data.Ior
-import cats.Show
 import cats.Eq
 import java.nio.file.Path
 
 object Diff:
   given Eq[Path] = Eq.fromUniversalEquals
 
-  private val getFileName: Resource.Directed => String =
-    _.value.path.getFileName.toString
+  trait FileNameReader:
+    def apply(resource: Resource.Directed): String
 
-  private def diff[R <: Resource](
+  object FileNameReader:
+    object ByFileName extends FileNameReader:
+      def apply(resource: Resource.Directed): String =
+        resource.value.name
+
+    object FollowSymLink extends FileNameReader:
+      def apply(resource: Resource.Directed): String =
+        resource match
+          case Resource.Source(res) =>
+            res.name match
+              case s"dot-${name}" => s".$name"
+              case other          => other
+          case resource =>
+            resource.value.name
+
+  sealed trait Result
+  object Result:
+    case class Left(left: Resource)                      extends Result
+    case class Both(left: Resource, right: Resource)     extends Result
+    case class Right(right: Resource)                    extends Result
+    case class Conflict(left: Resource, right: Resource) extends Result
+    case class Error(error: Throwable)                   extends Result
+
+  private def diff(
       left: List[Resource.Directed],
       right: List[Resource.Directed],
-      keyEncode: Resource.Directed => String,
-  ): List[Ior[Resource, Resource]] =
+      readFileName: FileNameReader,
+  ): List[Result] =
     (
-      left.map(l => keyEncode(l) -> l.value.asLeft) ++
-        right.map(r => keyEncode(r) -> r.value.asRight)
+      left.map(l => readFileName(l) -> l.value.asLeft) ++
+        right.map(r => readFileName(r) -> r.value.asRight)
     ).groupBy(_._1)
       .view
       .mapValues(_.map(_._2))
       .values
-      .flatMap:
-        case Left(left) :: Nil                 => Ior.left(left).pure[List]
-        case Right(right) :: Nil               => Ior.right(right).pure[List]
-        case Left(left) :: Right(right @ Resource.Ref(_, target)) :: Nil
-             if target === left.path =>
-          Ior.both(left, right).pure[List]
-        case Left(left @ Resource.Directory(_)) :: Right(
-               right @ Resource.Directory(_),
-             ) :: Nil =>
-          Ior.both(left, right).pure[List]
+      .map:
+        case Left(left) :: Nil   => Result.Left(left)
+        case Right(right) :: Nil => Result.Right(right)
+        case Left(left) :: Right(right @ Resource.Ref(_, target)) :: Nil if target === left.path =>
+          Result.Both(left, right)
+        case Left(left @ Resource.Directory(_)) :: Right(right @ Resource.Directory(_)) :: Nil =>
+          Result.Both(left, right)
         case Left(left) :: Right(right) :: Nil =>
-          List(
-            Ior.Left(left),
-            Ior.Right(right),
-          )
-        case found                             =>
-          // NOTE: Fallback case if more than two files per single name exists
-          val lefts  = found.collect:
-            case Left(left) => Resource.Source(left)
-          val rights = found.collect:
-            case Right(right) => Resource.Target(right)
-          diff(lefts, rights, getFileName)
+          Result.Conflict(left, right)
+        case found =>
+          // NOTE: This cannot happen as we cannot have two files with the same name
+          val lefts = found
+            .collect:
+              case Left(left) => left.path.toString
+            .mkString("- ", "\n", "\n")
+          val rights = found
+            .collect:
+              case Right(right) => right.path.toString
+            .mkString("- ", "\n", "\n")
+          val error = s"Got unexpected state in source folder:\n$lefts\nin target folder:\n$rights\n"
+          Result.Error(new RuntimeException(error))
       .toList
 
-  def apply[R <: Resource](
+  def apply(
       left: List[Resource.Directed],
       right: List[Resource.Directed],
-  )(using Show[Resource.Directed]): List[Ior[Resource, Resource]] =
-    diff(left, right, Show[Resource.Directed].show)
+  )(using fileNameReader: FileNameReader): List[Result] =
+    diff(left, right, fileNameReader)
